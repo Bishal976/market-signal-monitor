@@ -1,4 +1,4 @@
-// Last updated: 2026-06-14 — batch dedup writes (single seen_posts.json write per run)
+// Last updated: 2026-06-16 — BUG1: age filter for stories + stale hiring-thread guard
 import axios from "axios";
 import { isSeen, markSeenBatch } from "./dedup";
 import { sendJobAlert } from "./mailer";
@@ -13,10 +13,9 @@ import { JobPost } from "./types";
 
 const NEW_STORIES_URL = "https://hacker-news.firebaseio.com/v0/newstories.json";
 const ITEM_URL = (id: number) => `https://hacker-news.firebaseio.com/v0/item/${id}.json`;
-const HN_ALGOLIA_HIRING_URL =
-  "https://hn.algolia.com/api/v1/search?query=Ask+HN+Who+is+hiring&tags=story&hitsPerPage=1";
 const TOP_N = 20;
 const HIRING_THREAD_COMMENTS = 50;
+const MAX_POST_AGE_DAYS = 30;
 
 interface HnItem {
   id: number;
@@ -82,6 +81,16 @@ export async function runHnMonitor(): Promise<void> {
     for (const item of items) {
       if (!item || item.type !== "story" || !item.title) continue;
 
+      // Reject posts older than MAX_POST_AGE_DAYS
+      if (item.time) {
+        const ageMs = Date.now() - item.time * 1000;
+        const ageDays = ageMs / (1000 * 60 * 60 * 24);
+        if (ageDays > MAX_POST_AGE_DAYS) {
+          console.log(`[HN] [AGE-FILTER] Skipped (${Math.floor(ageDays)}d old): ${item.title}`);
+          continue;
+        }
+      }
+
       const text = `${item.title} ${item.text ?? ""}`;
       if (!matchesKeywords(text)) continue;
       if (isSeen("HN", String(item.id))) continue;
@@ -119,17 +128,32 @@ export async function searchHNHiringThread(): Promise<void> {
   const seenBatch: Array<{ id: string; source: string }> = [];
 
   try {
-    const { data } = await axios.get(HN_ALGOLIA_HIRING_URL, { timeout: 30000 });
+    // Constrain Algolia search to threads posted within the last 40 days,
+    // so we never pick up a stale thread by relevance rank.
+    const cutoff = Math.floor((Date.now() - 40 * 24 * 60 * 60 * 1000) / 1000);
+    const algoliaUrl = `https://hn.algolia.com/api/v1/search?query=Ask+HN+Who+is+hiring&tags=story&hitsPerPage=1&numericFilters=created_at_i>${cutoff}`;
+
+    const { data } = await axios.get(algoliaUrl, { timeout: 30000 });
     const hit = data?.hits?.[0];
     if (!hit) {
-      console.warn(`[${timestamp}] [HN-HIRING] No "Who is hiring" thread found.`);
+      console.warn(`[${timestamp}] [HN-HIRING] No "Who is hiring" thread found within the last 40 days.`);
       return;
     }
 
     const threadId = Number(hit.objectID);
     const { data: thread } = await axios.get<HnItem>(ITEM_URL(threadId), { timeout: 30000 });
-    const commentIds = (thread.kids ?? []).slice(0, HIRING_THREAD_COMMENTS);
 
+    if (!thread || !thread.time) {
+      console.log(`[HN-HIRING] No valid thread found within the last 40 days. Skipping.`);
+      return;
+    }
+    const threadAgeDays = (Date.now() - thread.time * 1000) / (1000 * 60 * 60 * 24);
+    if (threadAgeDays > 40) {
+      console.log(`[HN-HIRING] Thread is ${Math.floor(threadAgeDays)}d old — skipping stale thread.`);
+      return;
+    }
+
+    const commentIds = (thread.kids ?? []).slice(0, HIRING_THREAD_COMMENTS);
     console.log(`[${timestamp}] [HN-HIRING] Found thread ${threadId}, checking ${commentIds.length} comments`);
 
     for (const commentId of commentIds) {

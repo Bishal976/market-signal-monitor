@@ -1,4 +1,4 @@
-// Last updated: 2026-06-14 — batch dedup writes (single seen_posts.json write per run)
+// Last updated: 2026-06-16 — BUG2: r/hiring seller filter; BUG3: universal showcase/seller filter
 import axios from "axios";
 import { fetchFeed, RssEntry } from "./rss";
 import { isSeen, markSeenBatch } from "./dedup";
@@ -12,38 +12,67 @@ function stripHtml(html: string): string {
   return html.replace(/<[^>]*>/g, " ").replace(/\s+/g, " ").trim().slice(0, 500);
 }
 
+const FOR_HIRE_PATTERNS = [
+  "[for hire]",
+  "[forhire]",
+  "for hire",
+  "available for hire",
+  "available for work",
+  "offering my services",
+];
+
 const WEBDEV_SHOWCASE_PATTERNS = [
   "showoff saturday",
   "show and tell",
+  "show hn",
   "monthly",
   "weekly thread",
   "what are you working on",
   "i built",
-  "show hn",
+  "i made",
+  "i created",
+  "just launched",
+  "just shipped",
+  "side project",
+  "[oc]",
+  "open source",
+  "free for solo",
 ];
 
 /**
  * Pre-filters posts by intent before they reach the AI, to avoid wasting
  * API calls on freelancer self-ads and community showcase threads.
+ * Universal seller/showcase checks run first and apply to ALL feed sources.
  */
 function passesIntentFilter(feedUrl: string, title: string): boolean {
   const lower = title.toLowerCase();
 
-  if (feedUrl.includes("/r/forhire/")) {
-    if (lower.includes("[for hire]") || lower.includes("for hire")) {
-      console.log(`[INTENT-FILTER] Skipped: ${title}`);
-      return false;
-    }
-    if (lower.includes("[hiring]") || lower.startsWith("hiring")) return true;
-    console.log(`[INTENT-FILTER] Skipped: ${title}`);
+  // Universal showcase/builder exclusions — apply to ALL feeds
+  if (WEBDEV_SHOWCASE_PATTERNS.some((pattern) => lower.includes(pattern))) {
+    console.log(`[INTENT-FILTER] Skipped (showcase pattern): ${title}`);
     return false;
   }
 
+  // Universal seller exclusions — apply to ALL feeds
+  if (FOR_HIRE_PATTERNS.some((p) => lower.includes(p))) {
+    console.log(`[INTENT-FILTER] Skipped (seller): ${title}`);
+    return false;
+  }
+
+  // r/forhire: require an explicit hiring signal in the title
+  if (feedUrl.includes("/r/forhire/")) {
+    if (lower.includes("[hiring]") || lower.startsWith("hiring")) return true;
+    console.log(`[INTENT-FILTER] Skipped (r/forhire no hiring signal): ${title}`);
+    return false;
+  }
+
+  // r/hiring: seller posts already caught above; remaining posts are buyer-side
+  if (feedUrl.includes("/r/hiring/")) {
+    return true;
+  }
+
+  // r/webdev: showcase patterns already caught above
   if (feedUrl.includes("/r/webdev/")) {
-    if (WEBDEV_SHOWCASE_PATTERNS.some((pattern) => lower.includes(pattern))) {
-      console.log(`[INTENT-FILTER] Skipped: ${title}`);
-      return false;
-    }
     return true;
   }
 
@@ -127,3 +156,35 @@ export async function runRedditMonitor(): Promise<void> {
   markSeenBatch(seenBatch);
   console.log(`[${timestamp}] [REDDIT] Run complete. New matches: ${matched}, feed errors: ${errors}`);
 }
+
+// Self-test for the intent filter — remove after confirming all pass
+function runIntentFilterTests(): void {
+  const tests: Array<{ feedUrl: string; title: string; expected: boolean }> = [
+    // Should FAIL (skip)
+    { feedUrl: "https://www.reddit.com/r/forhire/new/.rss", title: "[FOR HIRE] I'll redesign & develop your website for a flat $750", expected: false },
+    { feedUrl: "https://www.reddit.com/r/forhire/new/.rss", title: "[FOR HIRE] I'm a Web Developer - WordPress/WooCommerce/Shopify", expected: false },
+    { feedUrl: "https://www.reddit.com/r/hiring/new/.rss", title: "[FOR HIRE] Senior React Developer available for hire", expected: false },
+    { feedUrl: "https://www.reddit.com/r/webdev/new/.rss", title: "Show Showoff Saturday: Site Mirror Skill — Open-source CLI", expected: false },
+    { feedUrl: "https://www.reddit.com/r/webdev/new/.rss", title: "I built a lightweight, zero dependency TS table/grid", expected: false },
+    // Should PASS
+    { feedUrl: "https://www.reddit.com/r/forhire/new/.rss", title: "[HIRING] React developer needed for SaaS startup", expected: true },
+    { feedUrl: "https://www.reddit.com/r/forhire/new/.rss", title: "Coding Sprint [Hiring]", expected: true },
+    { feedUrl: "https://www.reddit.com/r/hiring/new/.rss", title: "Looking for a frontend engineer, remote, $80-120/hr", expected: true },
+  ];
+
+  let passed = 0;
+  let failed = 0;
+  for (const t of tests) {
+    const result = passesIntentFilter(t.feedUrl, t.title);
+    if (result === t.expected) {
+      console.log(`[TEST PASS] "${t.title}"`);
+      passed++;
+    } else {
+      console.error(`[TEST FAIL] Expected ${t.expected}, got ${result} — "${t.title}"`);
+      failed++;
+    }
+  }
+  console.log(`\nIntent filter tests: ${passed} passed, ${failed} failed`);
+}
+
+runIntentFilterTests();
