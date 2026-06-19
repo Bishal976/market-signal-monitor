@@ -4,8 +4,9 @@ import { fetchFeed, RssEntry } from "./rss";
 import { isSeen, markSeenBatch } from "./dedup";
 import { sendJobAlert } from "./mailer";
 import { analyzeAndDraft, canMakeAiCall, incrementAiCallCount, addCappedLead } from "./ai-filter";
-import { REDDIT_FEEDS, matchesKeywords } from "./config";
+import { REDDIT_FEEDS, checkKeywords } from "./config";
 import { JobPost } from "./types";
+import { recordScanned, recordKeywordMatch, recordIntentPass, recordAiScored, recordEmailSent } from "./stats";
 
 /** Strips HTML tags and collapses whitespace, for use as an email/AI-prompt snippet. */
 function stripHtml(html: string): string {
@@ -130,11 +131,14 @@ export async function runRedditMonitor(): Promise<void> {
       const entries = await fetchFeedWithRetry(feedUrl);
 
       for (const entry of entries) {
+        recordScanned();
         const text = `${entry.title} ${entry.description}`;
-        if (!matchesKeywords(text)) continue;
+        if (!checkKeywords(entry.title, text)) continue;
+        recordKeywordMatch();
         if (isSeen("REDDIT", entry.id)) continue;
         seenBatch.push({ id: entry.id, source: "REDDIT" });
         if (!passesIntentFilter(feedUrl, entry.title)) continue;
+        recordIntentPass();
 
         const job: JobPost = {
           id: entry.id,
@@ -151,14 +155,17 @@ export async function runRedditMonitor(): Promise<void> {
           continue;
         }
         incrementAiCallCount();
+        recordAiScored();
 
         try {
           const aiResult = await analyzeAndDraft(job);
           if (!aiResult) continue;
           await sendJobAlert(job, aiResult);
+          recordEmailSent();
         } catch (err) {
           console.error("[AI-FILTER] error:", (err as Error).message);
           await sendJobAlert(job);
+          recordEmailSent();
         }
         matched++;
       }

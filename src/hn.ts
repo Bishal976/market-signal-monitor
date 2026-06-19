@@ -8,8 +8,9 @@ import {
   incrementAiCallCount,
   addCappedLead,
 } from "./ai-filter";
-import { matchesKeywords } from "./config";
+import { checkKeywords } from "./config";
 import { JobPost } from "./types";
+import { recordScanned, recordKeywordMatch, recordIntentPass, recordAiScored, recordEmailSent } from "./stats";
 
 const NEW_STORIES_URL = "https://hacker-news.firebaseio.com/v0/newstories.json";
 const ITEM_URL = (id: number) => `https://hacker-news.firebaseio.com/v0/item/${id}.json`;
@@ -43,14 +44,17 @@ async function processJob(job: JobPost): Promise<boolean> {
     return false;
   }
   incrementAiCallCount();
+  recordAiScored();
 
   try {
     const aiResult = await analyzeAndDraft(job);
     if (!aiResult) return false;
     await sendJobAlert(job, aiResult);
+    recordEmailSent();
   } catch (err) {
     console.error("[AI-FILTER] error:", (err as Error).message);
     await sendJobAlert(job);
+    recordEmailSent();
   }
   return true;
 }
@@ -80,6 +84,7 @@ export async function runHnMonitor(): Promise<void> {
     // 3. Process and filter the successfully fetched items
     for (const item of items) {
       if (!item || item.type !== "story" || !item.title) continue;
+      recordScanned();
 
       // Reject posts older than MAX_POST_AGE_DAYS
       if (item.time) {
@@ -92,9 +97,11 @@ export async function runHnMonitor(): Promise<void> {
       }
 
       const text = `${item.title} ${item.text ?? ""}`;
-      if (!matchesKeywords(text)) continue;
+      if (!checkKeywords(item.title, text)) continue;
+      recordKeywordMatch();
       if (isSeen("HN", String(item.id))) continue;
       seenBatch.push({ id: String(item.id), source: "HN" });
+      recordIntentPass(); // HN stories have no intent-filter stage
 
       const job: JobPost = {
         id: String(item.id),
@@ -160,11 +167,16 @@ export async function searchHNHiringThread(): Promise<void> {
       try {
         const { data: comment } = await axios.get<HnItem>(ITEM_URL(commentId), { timeout: 30000 });
         if (!comment || comment.type !== "comment" || !comment.text) continue;
+        recordScanned();
 
         const plainText = stripHtml(comment.text);
-        if (!matchesKeywords(plainText)) continue;
+        if (!checkKeywords(plainText.slice(0, 80), plainText)) continue;
+        recordKeywordMatch();
         if (isSeen("HN_HIRING", String(commentId))) continue;
         seenBatch.push({ id: String(commentId), source: "HN_HIRING" });
+        // TEMP-DEBUG: Log intent pass
+        console.log(`[TEMP-DEBUG] [HN-HIRING] Intent filter PASS: "${plainText.slice(0, 60)}"`);
+        recordIntentPass(); // hiring-thread comments are always hiring intent
 
         const job: JobPost = {
           id: String(commentId),
@@ -175,6 +187,7 @@ export async function searchHNHiringThread(): Promise<void> {
           posted: comment.time ? new Date(comment.time * 1000).toISOString() : undefined,
         };
 
+        console.log(`[TEMP-DEBUG] [HN-HIRING] About to call processJob: "${plainText.slice(0, 50)}"`);
         await processJob(job);
       } catch (itemErr) {
         console.warn(`[HN-HIRING] Dropped connection on comment ${commentId}, skipping to next...`);

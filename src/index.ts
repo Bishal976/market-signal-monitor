@@ -5,6 +5,7 @@ import { runHnMonitor, searchHNHiringThread } from "./hn";
 import { runRedditMonitor } from "./reddit";
 import { resetAiCycleState, getCappedLeads } from "./ai-filter";
 import { sendLeadsDigest } from "./mailer";
+import { logDailySummary } from "./stats";
 
 dotenv.config();
 
@@ -33,6 +34,7 @@ async function main() {
     console.error("Monitor cycle error:", (error as Error).message);
   }
 
+  logDailySummary();
   console.log(`[${timestamp}] Cycle complete.`);
 }
 
