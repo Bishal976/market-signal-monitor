@@ -66,14 +66,20 @@ export async function runHnMonitor(): Promise<void> {
 
   try {
     // 1. Fetch the list of IDs
-    const { data: ids } = await axios.get<number[]>(NEW_STORIES_URL, { timeout: 30000 });
+    const { data: ids } = await axios.get<number[]>(NEW_STORIES_URL, { 
+      timeout: 30000,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 JobMonitorBot/1.0" }
+    });
     const topIds = ids.slice(0, TOP_N);
     const items: HnItem[] = [];
 
     // 2. Fetch items sequentially to prevent mobile hotspot connection dropping
     for (const id of topIds) {
       try {
-        const res = await axios.get<HnItem>(ITEM_URL(id), { timeout: 30000 });
+        const res = await axios.get<HnItem>(ITEM_URL(id), { 
+          timeout: 30000,
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 JobMonitorBot/1.0" }
+        });
         if (res.data) items.push(res.data);
       } catch (itemErr) {
         console.warn(`[HN] Dropped connection on item ${id}, skipping to next...`);
@@ -140,7 +146,10 @@ export async function searchHNHiringThread(): Promise<void> {
     const cutoff = Math.floor((Date.now() - 40 * 24 * 60 * 60 * 1000) / 1000);
     const algoliaUrl = `https://hn.algolia.com/api/v1/search?query=Ask+HN+Who+is+hiring&tags=story&hitsPerPage=1&numericFilters=created_at_i>${cutoff}`;
 
-    const { data } = await axios.get(algoliaUrl, { timeout: 30000 });
+    const { data } = await axios.get(algoliaUrl, { 
+      timeout: 30000,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 JobMonitorBot/1.0" }
+    });
     const hit = data?.hits?.[0];
     if (!hit) {
       console.warn(`[${timestamp}] [HN-HIRING] No "Who is hiring" thread found within the last 40 days.`);
@@ -148,7 +157,10 @@ export async function searchHNHiringThread(): Promise<void> {
     }
 
     const threadId = Number(hit.objectID);
-    const { data: thread } = await axios.get<HnItem>(ITEM_URL(threadId), { timeout: 30000 });
+    const { data: thread } = await axios.get<HnItem>(ITEM_URL(threadId), { 
+      timeout: 30000,
+      headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 JobMonitorBot/1.0" }
+    });
 
     if (!thread || !thread.time) {
       console.log(`[HN-HIRING] No valid thread found within the last 40 days. Skipping.`);
@@ -165,7 +177,10 @@ export async function searchHNHiringThread(): Promise<void> {
 
     for (const commentId of commentIds) {
       try {
-        const { data: comment } = await axios.get<HnItem>(ITEM_URL(commentId), { timeout: 30000 });
+        const { data: comment } = await axios.get<HnItem>(ITEM_URL(commentId), { 
+          timeout: 30000,
+          headers: { "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 JobMonitorBot/1.0" }
+        });
         if (!comment || comment.type !== "comment" || !comment.text) continue;
         recordScanned();
 

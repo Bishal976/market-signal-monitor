@@ -1,12 +1,14 @@
-// Last updated: 2026-06-16 — BUG4: r/webdev help-request false positive filter
+// Last updated: 2026-06-22 — combined 13-subreddit feed via Reddit's multi-subreddit .rss endpoint
 import axios from "axios";
 import { fetchFeed, RssEntry } from "./rss";
 import { isSeen, markSeenBatch } from "./dedup";
 import { sendJobAlert } from "./mailer";
 import { analyzeAndDraft, canMakeAiCall, incrementAiCallCount, addCappedLead } from "./ai-filter";
-import { REDDIT_FEEDS, checkKeywords } from "./config";
+import { SUBREDDITS, REDDIT_FEED_URL, checkKeywords } from "./config";
 import { JobPost } from "./types";
 import { recordScanned, recordKeywordMatch, recordIntentPass, recordAiScored, recordEmailSent } from "./stats";
+
+console.log(`Monitoring ${SUBREDDITS.length} subreddits: ${SUBREDDITS.join(", ")}`);
 
 /** Strips HTML tags and collapses whitespace, for use as an email/AI-prompt snippet. */
 function stripHtml(html: string): string {
@@ -54,37 +56,38 @@ const WEBDEV_HELP_REQUEST_PATTERNS = [
 /**
  * Pre-filters posts by intent before they reach the AI, to avoid wasting
  * API calls on freelancer self-ads and community showcase threads.
- * Universal seller/showcase checks run first and apply to ALL feed sources.
+ * Universal seller/showcase checks run first and apply to ALL subreddits.
  */
-function passesIntentFilter(feedUrl: string, title: string): boolean {
+function passesIntentFilter(subreddit: string, title: string): boolean {
   const lower = title.toLowerCase();
+  const sub = subreddit.toLowerCase();
 
-  // Universal showcase/builder exclusions — apply to ALL feeds
+  // Universal showcase/builder exclusions — apply to ALL subreddits
   if (WEBDEV_SHOWCASE_PATTERNS.some((pattern) => lower.includes(pattern))) {
     console.log(`[INTENT-FILTER] Skipped (showcase pattern): ${title}`);
     return false;
   }
 
-  // Universal seller exclusions — apply to ALL feeds
+  // Universal seller exclusions — apply to ALL subreddits
   if (FOR_HIRE_PATTERNS.some((p) => lower.includes(p))) {
     console.log(`[INTENT-FILTER] Skipped (seller): ${title}`);
     return false;
   }
 
   // r/forhire: require an explicit hiring signal in the title
-  if (feedUrl.includes("/r/forhire/")) {
+  if (sub === "forhire") {
     if (lower.includes("[hiring]") || lower.startsWith("hiring")) return true;
     console.log(`[INTENT-FILTER] Skipped (r/forhire no hiring signal): ${title}`);
     return false;
   }
 
   // r/hiring: seller posts already caught above; remaining posts are buyer-side
-  if (feedUrl.includes("/r/hiring/")) {
+  if (sub === "hiring") {
     return true;
   }
 
   // r/webdev: help-request posts have no buying intent — skip them
-  if (feedUrl.includes("/r/webdev/")) {
+  if (sub === "webdev") {
     if (WEBDEV_HELP_REQUEST_PATTERNS.some((pattern) => lower.includes(pattern))) {
       console.log(`[INTENT-FILTER] Skipped (help request, no buying intent): ${title}`);
       return false;
@@ -92,18 +95,18 @@ function passesIntentFilter(feedUrl: string, title: string): boolean {
     return true;
   }
 
+  // All other subreddits (devjobs, hireaideveloper, startups, etc.): no
+  // dedicated rules yet, fall through to the universal checks above.
   return true;
 }
 
 const RETRY_DELAY_MS = 30_000;
-const FEED_DELAY_MS = 60_000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-// 429 retry preserved after cron change
-/** Fetches a feed, retrying once after a 30s delay if rate-limited (429). */
+/** Fetches the combined feed, retrying once after a 30s delay if rate-limited (429). */
 async function fetchFeedWithRetry(url: string): Promise<RssEntry[]> {
   try {
     return await fetchFeed(url);
@@ -120,90 +123,83 @@ async function fetchFeedWithRetry(url: string): Promise<RssEntry[]> {
 export async function runRedditMonitor(): Promise<void> {
   const timestamp = new Date().toISOString();
   let matched = 0;
-  let errors = 0;
   const seenBatch: Array<{ id: string; source: string }> = [];
 
-  for (let i = 0; i < REDDIT_FEEDS.length; i++) {
-    const feedUrl = REDDIT_FEEDS[i];
-    if (i > 0) await sleep(FEED_DELAY_MS);
+  try {
+    const entries = await fetchFeedWithRetry(REDDIT_FEED_URL);
 
-    try {
-      const entries = await fetchFeedWithRetry(feedUrl);
+    for (const entry of entries) {
+      recordScanned();
+      const text = `${entry.title} ${entry.description}`;
+      if (!checkKeywords(entry.title, text)) continue;
+      recordKeywordMatch();
+      if (isSeen("REDDIT", entry.id)) continue;
+      seenBatch.push({ id: entry.id, source: "REDDIT" });
+      if (!passesIntentFilter(entry.subreddit ?? "", entry.title)) continue;
+      recordIntentPass();
 
-      for (const entry of entries) {
-        recordScanned();
-        const text = `${entry.title} ${entry.description}`;
-        if (!checkKeywords(entry.title, text)) continue;
-        recordKeywordMatch();
-        if (isSeen("REDDIT", entry.id)) continue;
-        seenBatch.push({ id: entry.id, source: "REDDIT" });
-        if (!passesIntentFilter(feedUrl, entry.title)) continue;
-        recordIntentPass();
+      const job: JobPost = {
+        id: entry.id,
+        source: "REDDIT",
+        title: entry.title,
+        url: entry.link,
+        detail: stripHtml(entry.description),
+        posted: entry.pubDate,
+      };
 
-        const job: JobPost = {
-          id: entry.id,
-          source: "REDDIT",
-          title: entry.title,
-          url: entry.link,
-          detail: stripHtml(entry.description),
-          posted: entry.pubDate,
-        };
-
-        if (!canMakeAiCall()) {
-          console.log("[AI-FILTER] Cycle cap reached, skipping remaining matches.");
-          addCappedLead({ title: job.title, url: job.url });
-          continue;
-        }
-        incrementAiCallCount();
-        recordAiScored();
-
-        try {
-          const aiResult = await analyzeAndDraft(job);
-          if (!aiResult) continue;
-          await sendJobAlert(job, aiResult);
-          recordEmailSent();
-        } catch (err) {
-          console.error("[AI-FILTER] error:", (err as Error).message);
-          await sendJobAlert(job);
-          recordEmailSent();
-        }
-        matched++;
+      if (!canMakeAiCall()) {
+        console.log("[AI-FILTER] Cycle cap reached, skipping remaining matches.");
+        addCappedLead({ title: job.title, url: job.url });
+        continue;
       }
-    } catch (err) {
-      errors++;
-      console.error(`[${timestamp}] [REDDIT] Error fetching ${feedUrl}:`, (err as Error).message);
+      incrementAiCallCount();
+      recordAiScored();
+
+      try {
+        const aiResult = await analyzeAndDraft(job);
+        if (!aiResult) continue;
+        await sendJobAlert(job, aiResult);
+        recordEmailSent();
+      } catch (err) {
+        console.error("[AI-FILTER] error:", (err as Error).message);
+        await sendJobAlert(job);
+        recordEmailSent();
+      }
+      matched++;
     }
+  } catch (err) {
+    console.error(`[${timestamp}] [REDDIT] Error fetching ${REDDIT_FEED_URL}:`, (err as Error).message);
   }
 
   markSeenBatch(seenBatch);
-  console.log(`[${timestamp}] [REDDIT] Run complete. New matches: ${matched}, feed errors: ${errors}`);
+  console.log(`[${timestamp}] [REDDIT] Run complete. New matches: ${matched}`);
 }
 
 // Self-test for the intent filter — remove after confirming all pass
 function runIntentFilterTests(): void {
-  const tests: Array<{ feedUrl: string; title: string; expected: boolean }> = [
+  const tests: Array<{ subreddit: string; title: string; expected: boolean }> = [
     // Should FAIL (skip)
-    { feedUrl: "https://www.reddit.com/r/forhire/new/.rss", title: "[FOR HIRE] I'll redesign & develop your website for a flat $750", expected: false },
-    { feedUrl: "https://www.reddit.com/r/forhire/new/.rss", title: "[FOR HIRE] I'm a Web Developer - WordPress/WooCommerce/Shopify", expected: false },
-    { feedUrl: "https://www.reddit.com/r/hiring/new/.rss", title: "[FOR HIRE] Senior React Developer available for hire", expected: false },
-    { feedUrl: "https://www.reddit.com/r/webdev/new/.rss", title: "Show Showoff Saturday: Site Mirror Skill — Open-source CLI", expected: false },
-    { feedUrl: "https://www.reddit.com/r/webdev/new/.rss", title: "I built a lightweight, zero dependency TS table/grid", expected: false },
+    { subreddit: "forhire", title: "[FOR HIRE] I'll redesign & develop your website for a flat $750", expected: false },
+    { subreddit: "forhire", title: "[FOR HIRE] I'm a Web Developer - WordPress/WooCommerce/Shopify", expected: false },
+    { subreddit: "hiring", title: "[FOR HIRE] Senior React Developer available for hire", expected: false },
+    { subreddit: "webdev", title: "Show Showoff Saturday: Site Mirror Skill — Open-source CLI", expected: false },
+    { subreddit: "webdev", title: "I built a lightweight, zero dependency TS table/grid", expected: false },
     // r/webdev help-requests — Should FAIL (skip)
-    { feedUrl: "https://www.reddit.com/r/webdev/new/.rss", title: "Need help in setting up Single-SPA + React + Vite + TypeScript microfrontend architecture", expected: false },
-    { feedUrl: "https://www.reddit.com/r/webdev/new/.rss", title: "How do I optimize React re-renders in a large dashboard?", expected: false },
-    { feedUrl: "https://www.reddit.com/r/webdev/new/.rss", title: "Looking for guidance on Next.js App Router migration", expected: false },
-    { feedUrl: "https://www.reddit.com/r/webdev/new/.rss", title: "Having trouble with TypeScript generics, can someone explain?", expected: false },
+    { subreddit: "webdev", title: "Need help in setting up Single-SPA + React + Vite + TypeScript microfrontend architecture", expected: false },
+    { subreddit: "webdev", title: "How do I optimize React re-renders in a large dashboard?", expected: false },
+    { subreddit: "webdev", title: "Looking for guidance on Next.js App Router migration", expected: false },
+    { subreddit: "webdev", title: "Having trouble with TypeScript generics, can someone explain?", expected: false },
     // Should PASS
-    { feedUrl: "https://www.reddit.com/r/forhire/new/.rss", title: "[HIRING] React developer needed for SaaS startup", expected: true },
-    { feedUrl: "https://www.reddit.com/r/forhire/new/.rss", title: "Coding Sprint [Hiring]", expected: true },
-    { feedUrl: "https://www.reddit.com/r/hiring/new/.rss", title: "Looking for a frontend engineer, remote, $80-120/hr", expected: true },
-    { feedUrl: "https://www.reddit.com/r/webdev/new/.rss", title: "[Hiring] React developer needed for 2-week project", expected: true },
+    { subreddit: "forhire", title: "[HIRING] React developer needed for SaaS startup", expected: true },
+    { subreddit: "forhire", title: "Coding Sprint [Hiring]", expected: true },
+    { subreddit: "hiring", title: "Looking for a frontend engineer, remote, $80-120/hr", expected: true },
+    { subreddit: "webdev", title: "[Hiring] React developer needed for 2-week project", expected: true },
   ];
 
   let passed = 0;
   let failed = 0;
   for (const t of tests) {
-    const result = passesIntentFilter(t.feedUrl, t.title);
+    const result = passesIntentFilter(t.subreddit, t.title);
     if (result === t.expected) {
       console.log(`[TEST PASS] "${t.title}"`);
       passed++;

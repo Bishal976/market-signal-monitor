@@ -1,6 +1,7 @@
 // Last updated: 2026-06-14 — hardened Groq response parsing (markdown-fence stripping, shape validation)
 import axios from "axios";
 import { JobPost } from "./types";
+import { DEBUG_FILTERING } from "./config";
 
 const GROQ_URL = "https://api.groq.com/openai/v1/chat/completions";
 
@@ -136,6 +137,13 @@ export async function analyzeAndDraft(post: JobPost): Promise<AiResult | null> {
     // Throw (not return null) so the caller's catch block falls back to a
     // plain "[LEAD - NO AI]" email instead of silently dropping the lead.
     throw new Error("Groq response was not valid JSON");
+  }
+
+  // Gated at >=4 to surface near-misses without flooding logs with zero-score noise
+  if (DEBUG_FILTERING && parsed.score >= 4) {
+    console.log(
+      `[SCORE-RESULT] Score: ${parsed.score} | Email threshold: 6 | Will send: ${parsed.score >= 6} | Title: "${post.title}"`
+    );
   }
 
   if (parsed.score < 6) return null;

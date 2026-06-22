@@ -1,13 +1,32 @@
 export const KEYWORDS = [
-  "React", "Next.js", "frontend", "AI integration", "TypeScript", 
-  "javascript", "node", "full-stack", "web app", "developer", "engineer"
+  "React", "Next.js", "frontend", "AI integration", "TypeScript",
+  "javascript", "node", "full-stack", "web app", "developer", "engineer",
+  "claude code", "cursor", "lovable", "v0.dev", "bolt",
+  "vibe cod", "replit", "windsurf", "ai-built", "ai generated",
+  "vibecoded", "vibe-coded"
 ];
 
-export const REDDIT_FEEDS = [
-  "https://www.reddit.com/r/forhire/new/.rss",
-  "https://www.reddit.com/r/hiring/new/.rss",
-  "https://www.reddit.com/r/webdev/new/.rss",
+/** Adding a new subreddit only requires editing this array — the fetch URL is built from it. */
+export const SUBREDDITS = [
+  "forhire",
+  "hiring",
+  "devjobs",
+  "developers_hire",
+  "DeveloperJobs",
+  "freelance_forhire",
+  "FullStackDevelopers",
+  "hireaideveloper",
+  "B2BForHire",
+  "webdev",
+  "Entrepreneur",
+  "startups",
+  "founder",
 ];
+
+// Reddit's unauthenticated .json endpoint 403s from this host's IP (datacenter
+// anti-bot block); the combined-subreddit .rss endpoint hits the same data
+// without auth and isn't blocked, so we use that instead.
+export const REDDIT_FEED_URL = `https://www.reddit.com/r/${SUBREDDITS.join("+")}/new/.rss`;
 
 /** Set DEBUG_FILTERING=true to log every keyword check and the daily funnel summary. */
 export const DEBUG_FILTERING = process.env.DEBUG_FILTERING === "true";
