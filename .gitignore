@@ -1,6 +1,5 @@
 node_modules/
 dist/
 .env
-seen_posts.json
 monitor.log
 .claude/

@@ -1,0 +1,48 @@
+name: HN Who's Hiring
+
+on:
+  schedule:
+    # 10:00 AM IST == 04:30 UTC
+    - cron: "30 4 * * *"
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+concurrency:
+  group: hn-hiring
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: "npm"
+
+      - run: npm ci
+
+      - name: Check HN Who's Hiring thread
+        env:
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_APP_PASSWORD: ${{ secrets.GMAIL_APP_PASSWORD }}
+          GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
+          DEBUG_FILTERING: ${{ secrets.DEBUG_FILTERING }}
+        run: npx ts-node src/index.ts hn-hiring
+
+      - name: Persist dedup state
+        run: |
+          git config user.name "job-monitor-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add seen_posts.json
+          if git diff --cached --quiet; then
+            echo "No dedup changes to commit"
+          else
+            git commit -m "chore: update seen_posts.json [skip ci]"
+            git pull --rebase origin main
+            git push
+          fi
