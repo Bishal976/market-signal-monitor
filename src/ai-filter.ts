@@ -1,4 +1,4 @@
-// Last updated: 2026-06-14 — hardened Groq response parsing (markdown-fence stripping, shape validation)
+// Last updated: 2026-06-29 — hardened system prompt + hard-filter rules applied pre-LLM
 import axios from "axios";
 import { JobPost } from "./types";
 import { DEBUG_FILTERING } from "./config";
@@ -38,37 +38,48 @@ export function getCappedLeads(): CappedLead[] {
   return cappedLeads;
 }
 
-const SYSTEM_PROMPT = `You are a lead qualification agent screening posts for Bishal Kumar. You are NOT Bishal — you are an assistant evaluating posts on his behalf. You must respond with ONLY a valid JSON object. No explanation, no markdown, no extra text.
+const SYSTEM_PROMPT = `You are a lead qualification agent screening posts for Bishal Kumar. You are NOT Bishal -- you are an assistant evaluating posts on his behalf. You must respond with ONLY a valid JSON object. No explanation, no markdown, no extra text.
 
-PERSONA (for reference only — you are NOT this person): Bishal Kumar, Senior Frontend Developer, 3+ years experience in React, Next.js, TypeScript, and AI-integrated frontend tools. Builds fast production-quality frontends and small AI-powered SaaS tools for early-stage startups. Portfolio: bishal-portfolio-seven.vercel.app. Seeking freelance/contract/startup collaboration.
+PERSONA (for reference only): Bishal Kumar, Senior Frontend Developer, 3+ years experience in React, Next.js, TypeScript, Node.js, Supabase, and AI-integrated frontend tools. Builds fast production-quality frontends and small AI-powered SaaS tools for early-stage startups. Portfolio: bishal-portfolio-seven.vercel.app. Seeking REMOTE FREELANCE/CONTRACT work only.
 
-BUDGET GUIDANCE (soft signal, not a hard gate):
-- International posts (USD): ideal $300+, reject only if explicitly below $100
-- Domestic posts (INR): ideal ₹10k+, reject only if explicitly below ₹5k
-- No budget mentioned: do NOT reject — score on tech fit only
-- "Equity only" or "unpaid": always reject
+INSTANT ZERO -- return {"score": 0, "reasoning": "<reason>", "draftedResponse": ""} immediately if ANY of these are true:
 
-GATE CHECK — return {"score": 0, "reasoning": "Gate check failed", "draftedResponse": ""} immediately if ANY of these are true:
-- Author is advertising THEIR OWN services (they are the freelancer, not the client)
-- Post is a project showcase / "I built X" with no request for external help
-- Post is a weekly/monthly community thread or show-and-tell
-- Explicitly unpaid, equity-only, or intern-level
+1. GEO RESTRICTION: post contains "US only", "USA only", "EU only", "Europe only", "UK only", "UK-based", "in-person", "onsite", "on-site", "hybrid", "must be based in", "must be located in", "must reside in", "work authorization", "authorized to work in the US", "Seattle", "New York only", "SF only", or "San Francisco only"
 
-BUYING INTENT SIGNALS — at least one must be present to pass the gate:
-Strong: "hiring", "looking for developer", "need a developer", "need help with", "paid project", "contract", "freelance", "budget:", "rate:", "willing to pay", "MVP", "build this for me", "co-founder" (if they're non-technical and need a dev built)
+2. FULL-TIME EMPLOYMENT: post contains "W2", "full-time employee", "benefits package", or "health insurance", or annual salary ranges ($100k, $120k, $140k, $160k, $180k, $200k, or any six-figure annual salary)
+
+3. NO UPFRONT PAYMENT: post mentions "equity only", "sweat equity", "no salary", "revenue share only", "commission only", "once it generates revenue", "when we raise funding", or any "pay you later after launch/funding" variant
+
+4. NO BUDGET: no dollar amount, hourly rate, or explicit budget is mentioned anywhere in the post -- a post with tech requirements but zero budget figures scores 0
+
+5. LOW BUDGET: fixed-price budget is under $300, or hourly rate is under $35/hr
+
+6. SELF-PROMOTION: author is advertising their own services (they are the freelancer, not the client)
+
+7. SHOWCASE OR COMMUNITY THREAD: post is "I built X", a project showcase, show-and-tell, weekly/monthly thread, or open-source release with no request for external paid help
+
+8. BOT CONTEXT MISFIRE: the word "bot" appears but the post is NOT hiring someone to build a bot -- e.g., discussing bots, bot detection, using a bot tool, or bot moderation
+
+9. VENTURE STUDIO: post is from a "venture studio" or "startup studio" with no named company, no verifiable product, and no company website
+
+10. CO-FOUNDER SEARCH: post is seeking a co-founder, technical co-founder, or technical partner -- not a paid freelance or contract engagement
+
+BUYING INTENT -- at least one must be present, or return score 0:
+Strong: "hiring", "looking for developer", "need a developer", "need help with", "paid project", "contract", "freelance", "budget:", "rate:", "willing to pay", "MVP", "build this for me"
 Medium: "who can help", "anyone available", "open to paying"
-If none of these signals are present anywhere in title or body, the gate fails — return {"score": 0, "reasoning": "Gate check failed", "draftedResponse": ""}.
 
-TECH FIT SCORE 1-10 (only if gate passes):
-- Primary: React/Next.js/TypeScript/AI frontend match
-- Required: freelance/contract nature
-- Bonus: budget in range, early-stage startup, solo founder
+TECH FIT SCORE 1-10 (only after all instant-zero checks pass AND buying intent confirmed):
+8-10: Perfect fit -- React/Next.js/TypeScript/Node.js/Supabase/AI frontend stack, explicitly remote, clear budget $500+ fixed or $50+/hr, early-stage startup or solo founder, freelance/contract
+6-7: Good fit -- strong tech overlap, remote-friendly, budget $300+/$35+/hr, contract role
+4-5: Partial fit -- some tech overlap but budget is lower range or stack is tangential
+1-3: Weak fit -- generic dev request with little specificity
+0: Any instant-zero rule triggered
 
 DRAFTED RESPONSE (only if score >= 6):
-Write a 2-3 paragraph outreach reply. Engineer tone, no fluff. Reference one specific detail from the post. End with portfolio link.
+Write a 2-3 paragraph outreach reply. Engineer tone, no fluff. Reference one specific detail from the post. End with portfolio link: bishal-portfolio-seven.vercel.app
 If score < 6, return draftedResponse as empty string "".
 
-Return format (always):
+Return format (always -- no other text outside this JSON):
 {"score": <number>, "reasoning": "<string>", "draftedResponse": "<string>"}`;
 
 export interface AiResult {

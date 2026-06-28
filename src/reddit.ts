@@ -53,6 +53,68 @@ const WEBDEV_HELP_REQUEST_PATTERNS = [
   "unsure how", "unsure which",
 ];
 
+// GEO BLOCK: posts with location restrictions are never remote freelance work
+const GEO_BLOCK_PATTERNS: RegExp[] = [
+  /\beu[\s-]only\b/i,
+  /\beurope[\s-]only\b/i,
+  /\beuropean[\s-]only\b/i,
+  /\buk[\s-]only\b/i,
+  /\buk[\s-]based\b/i,
+  /united kingdom only/i,
+  /\bus[\s-]only\b/i,
+  /\busa[\s-]only\b/i,
+  /united states only/i,
+  /\bseattle\b/i,
+  /new york only/i,
+  /\bsf[\s-]only\b/i,
+  /san francisco only/i,
+  /must be based in/i,
+  /must reside in/i,
+  /must be located in/i,
+  /\bwork authorization\b/i,
+  /authorized to work in the us/i,
+  /\bin-person\b/i,
+  /\bonsite\b/i,
+  /\bon-site\b/i,
+  /\bhybrid\s+(work|role|position|schedule|arrangement)\b/i,
+];
+
+// EMPLOYMENT TYPE BLOCK: salary/benefits/equity-only signals mean it's not a freelance gig
+const EMPLOYMENT_BLOCK_PATTERNS: RegExp[] = [
+  /\$[1-9]\d{2,}k\b/i,
+  /full[\s-]time employee/i,
+  /\bw2\b/i,
+  /benefits package/i,
+  /health insurance/i,
+  /equity[\s-]only/i,
+  /sweat equity/i,
+  /\bno salary\b/i,
+  /revenue share only/i,
+  /commission[\s-]only/i,
+  /once it generates revenue/i,
+  /when we raise funding/i,
+];
+
+/**
+ * Hard pre-LLM filter. Returns false (discard) if the post contains any geo
+ * restriction or full-time employment signal. These posts never consume Groq quota.
+ */
+function passesHardFilter(text: string, title: string): boolean {
+  for (const pattern of GEO_BLOCK_PATTERNS) {
+    if (pattern.test(text)) {
+      console.log(`[HARD-FILTER] Geo block: "${title}"`);
+      return false;
+    }
+  }
+  for (const pattern of EMPLOYMENT_BLOCK_PATTERNS) {
+    if (pattern.test(text)) {
+      console.log(`[HARD-FILTER] Employment block: "${title}"`);
+      return false;
+    }
+  }
+  return true;
+}
+
 /**
  * Pre-filters posts by intent before they reach the AI, to avoid wasting
  * API calls on freelancer self-ads and community showcase threads.
@@ -137,6 +199,9 @@ export async function runRedditMonitor(): Promise<void> {
       seenBatch.push({ id: entry.id, source: "REDDIT" });
       if (!passesIntentFilter(entry.subreddit ?? "", entry.title)) continue;
       recordIntentPass();
+
+      // Hard filter — geo + employment type blocks before AI call
+      if (!passesHardFilter(text, entry.title)) continue;
 
       const job: JobPost = {
         id: entry.id,
